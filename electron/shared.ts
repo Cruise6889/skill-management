@@ -75,6 +75,85 @@ export interface SkillSummary {
   fileCount: number;
 }
 
+export type ChangeKind = "added" | "modified" | "deleted" | "unchanged";
+
+export interface FileChange {
+  relativePath: string;
+  kind: ChangeKind;
+  oldHash: string | null;
+  newHash: string | null;
+  oldSize: number | null;
+  newSize: number | null;
+}
+
+export interface LineChange {
+  kind: "context" | "added" | "deleted";
+  oldLine: number | null;
+  newLine: number | null;
+  content: string;
+}
+
+export interface SourceStatus {
+  kind: "local" | "github";
+  state: "linked" | "missing" | "checking" | "up_to_date" | "changes";
+  display: string;
+  branch: string | null;
+  revision: string | null;
+  lastCheckedAt: string | null;
+}
+
+export interface UpdatePreview {
+  token: string;
+  source: SourceStatus;
+  changes: FileChange[];
+  summary: { added: number; modified: number; deleted: number; unchanged: number };
+}
+
+export interface VersionSummary {
+  id: string;
+  label: string;
+  origin: "import" | "source_update" | "edit" | "restore";
+  note: string;
+  createdAt: string;
+  fileCount: number;
+}
+
+export interface VersionDiff {
+  version: VersionSummary;
+  changes: FileChange[];
+}
+
+export interface EditPreview {
+  token: string;
+  relativePath: string;
+  lines: LineChange[];
+  oldHash: string;
+  newHash: string;
+}
+
+export interface TransferPreview {
+  token: string;
+  mode: "install" | "export";
+  targetDisplay: string;
+  folderName: string;
+  targetExists: boolean;
+  changes: FileChange[];
+  conflicts: number;
+}
+
+export interface CompareSection {
+  section: AnalysisSection;
+  left: string[];
+  right: string[];
+  shared: string[];
+}
+
+export interface SkillComparison {
+  left: Pick<SkillSummary, "id" | "name" | "description" | "sourceType" | "fileCount">;
+  right: Pick<SkillSummary, "id" | "name" | "description" | "sourceType" | "fileCount">;
+  sections: CompareSection[];
+}
+
 export interface AiAnalysis {
   id: string;
   content: Record<string, unknown>;
@@ -89,6 +168,7 @@ export interface SkillDetail extends SkillSummary {
   files: IndexedFile[];
   ruleAnalysis: RuleAnalysis;
   aiAnalysis: AiAnalysis | null;
+  sourceStatus: SourceStatus;
 }
 
 export interface LibraryQuery {
@@ -182,6 +262,20 @@ export interface SkillExplorerApi {
   removeSkill(skillId: string): Promise<void>;
   undoRemove(skillId: string): Promise<void>;
   rerunRules(skillId: string): Promise<SkillDetail>;
+  linkLocalSource(skillId: string): Promise<UpdatePreview | null>;
+  checkSourceUpdate(skillId: string): Promise<UpdatePreview>;
+  applySourceUpdate(token: string): Promise<SkillDetail>;
+  discardSourceUpdate(token: string): Promise<void>;
+  getChangeLines(token: string, relativePath: string): Promise<LineChange[]>;
+  compareSkills(leftId: string, rightId: string): Promise<SkillComparison>;
+  getEditableFile(skillId: string, fileId: string): Promise<{ relativePath: string; content: string }>;
+  prepareFileEdit(skillId: string, fileId: string, content: string): Promise<EditPreview>;
+  applyFileEdit(token: string): Promise<SkillDetail>;
+  listVersions(skillId: string): Promise<VersionSummary[]>;
+  diffVersion(skillId: string, versionId: string): Promise<VersionDiff>;
+  restoreVersion(skillId: string, versionId: string): Promise<SkillDetail>;
+  prepareTransfer(skillId: string, mode: "install" | "export"): Promise<TransferPreview | null>;
+  applyTransfer(token: string, strategy: "overwrite" | "rename"): Promise<{ destinationDisplay: string }>;
   getAiSettings(): Promise<AiSettingsPublic>;
   saveAiSettings(settings: { baseUrl: string; model: string; apiKey?: string; allowLocalHttp: boolean }): Promise<AiSettingsPublic>;
   testAiConnection(): Promise<void>;

@@ -169,12 +169,16 @@ export class ImportService {
     const sourcePath = path.resolve(pending.clonePath, candidate.relativePath);
     if (!sourcePath.startsWith(path.resolve(pending.clonePath))) throw new Error("已拦截越界候选目录。");
     try {
+      const revision = await runGit(["rev-parse", "HEAD"], pending.clonePath);
       return await this.importFromDirectory(sourcePath, {
         sourceType: "github",
         sourceUrl: pending.url,
         sourceDisplay: pending.preflight.repositoryName,
         originalPath: null,
         fallbackName: candidate.label,
+        sourceSubpath: candidate.relativePath,
+        sourceBranch: pending.preflight.defaultBranch,
+        sourceRevision: revision,
       });
     } finally {
       this.githubTokens.delete(token);
@@ -204,7 +208,7 @@ export class ImportService {
 
   private async importFromDirectory(
     sourcePath: string,
-    source: { sourceType: "local" | "github"; sourceUrl: string | null; sourceDisplay: string; originalPath: string | null; fallbackName: string },
+    source: { sourceType: "local" | "github"; sourceUrl: string | null; sourceDisplay: string; originalPath: string | null; fallbackName: string; sourceSubpath?: string | null; sourceBranch?: string | null; sourceRevision?: string | null },
   ): Promise<SkillDetail> {
     const id = randomUUID();
     const tempSkillPath = path.join(this.dataRoot, "temp", `import-${id}`);
@@ -236,7 +240,7 @@ export class ImportService {
         analysis = parsed.analysis;
       }
       const importedAt = new Date().toISOString();
-      await fs.writeFile(path.join(tempSkillPath, "source.json"), JSON.stringify({ sourceType: source.sourceType, sourceUrl: source.sourceUrl, sourceDisplay: source.sourceDisplay, importedAt }, null, 2), "utf8");
+      await fs.writeFile(path.join(tempSkillPath, "source.json"), JSON.stringify({ sourceType: source.sourceType, sourceUrl: source.sourceUrl, sourceDisplay: source.sourceDisplay, sourceSubpath: source.sourceSubpath || null, sourceBranch: source.sourceBranch || null, sourceRevision: source.sourceRevision || null, importedAt }, null, 2), "utf8");
       await fs.rename(tempSkillPath, finalSkillPath);
       this.database.saveImportedSkill({
         id,
@@ -249,7 +253,22 @@ export class ImportService {
         libraryPath: finalSkillPath,
         originalPath: source.originalPath,
         importedAt,
+        sourceSubpath: source.sourceSubpath || null,
+        sourceBranch: source.sourceBranch || null,
+        sourceRevision: source.sourceRevision || null,
       }, files, analysis);
+      const versionId = randomUUID();
+      const versionContentPath = path.join(finalSkillPath, "versions", versionId, "content");
+      await copyDirectorySafely(path.join(finalSkillPath, "content"), versionContentPath);
+      this.database.saveVersion(id, {
+        id: versionId,
+        label: "初始导入",
+        origin: "import",
+        note: source.sourceType === "github" ? "从 GitHub 导入" : "从本机目录导入",
+        createdAt: importedAt,
+        contentPath: versionContentPath,
+        fileCount: files.length,
+      });
       this.emitProgress({ stage: "done", message: "导入完成" });
       return this.database.getSkill(id);
     } catch (error) {

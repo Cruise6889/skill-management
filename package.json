@@ -1,6 +1,6 @@
 {
   "name": "skill-explorer",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "private": true,
   "description": "本地优先的 Agent Skill 拆解与资料库工具",
   "main": "out/main/main.js",

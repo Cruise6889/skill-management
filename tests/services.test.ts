@@ -64,4 +64,9 @@ test("SQLite 资料库支持入库、搜索、分类、标签和收藏", async (
   assert.equal(database.listSkills({ favoritesOnly: true })[0].name, "legal-research");
   assert.deepEqual(database.getTaxonomy().categories, ["法律检索"]);
   assert.deepEqual(database.getSkill(id).tags, ["Codex", "案例"]);
+  const versionPath = path.join(root, "library", "versions", "v1", "content");
+  mkdirSync(versionPath, { recursive: true });
+  database.saveVersion(id, { id: "v1", label: "初始导入", origin: "import", note: "测试版本", createdAt: now, contentPath: versionPath, fileCount: files.length });
+  assert.equal(database.listVersions(id)[0].origin, "import");
+  assert.equal(database.getVersionPath(id, "v1"), versionPath);
 });

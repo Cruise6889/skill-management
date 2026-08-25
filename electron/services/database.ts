@@ -11,6 +11,7 @@ import type {
   SkillSummary,
   SourceType,
   TaxonomySnapshot,
+  VersionSummary,
 } from "../shared";
 
 interface SkillRecord {
@@ -24,6 +25,9 @@ interface SkillRecord {
   libraryPath: string;
   originalPath: string | null;
   importedAt: string;
+  sourceSubpath?: string | null;
+  sourceBranch?: string | null;
+  sourceRevision?: string | null;
 }
 
 type SqlValue = string | number | null;
@@ -115,7 +119,27 @@ export class SkillDatabase {
       CREATE INDEX IF NOT EXISTS idx_skills_active ON skills(removed_at, updated_at);
       CREATE INDEX IF NOT EXISTS idx_files_skill ON files(skill_id);
       CREATE INDEX IF NOT EXISTS idx_analyses_skill ON analyses(skill_id, kind, created_at);
+      CREATE TABLE IF NOT EXISTS versions (
+        id TEXT PRIMARY KEY,
+        skill_id TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+        label TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        content_path TEXT NOT NULL,
+        file_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_versions_skill ON versions(skill_id, created_at DESC);
     `);
+    this.ensureColumn("skills", "source_subpath", "TEXT");
+    this.ensureColumn("skills", "source_branch", "TEXT");
+    this.ensureColumn("skills", "source_revision", "TEXT");
+    this.ensureColumn("skills", "source_checked_at", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+    if (!columns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   saveImportedSkill(record: SkillRecord, files: IndexedFile[], analysis: RuleAnalysis): void {
@@ -124,8 +148,9 @@ export class SkillDatabase {
       this.db.prepare(`
         INSERT INTO skills (
           id, name, description, format, source_type, source_url, source_display,
-          library_path, original_path, imported_at, updated_at, analysis_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started')
+          library_path, original_path, imported_at, updated_at, analysis_status,
+          source_subpath, source_branch, source_revision
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'not_started', ?, ?, ?)
       `).run(
         record.id,
         record.name,
@@ -138,6 +163,9 @@ export class SkillDatabase {
         record.originalPath,
         record.importedAt,
         record.importedAt,
+        record.sourceSubpath || null,
+        record.sourceBranch || null,
+        record.sourceRevision || null,
       );
       const fileStatement = this.db.prepare(`
         INSERT INTO files (
@@ -251,17 +279,91 @@ export class SkillDatabase {
         createdAt: stringValue(aiRow, "created_at"),
         status: stringValue(aiRow, "status") as AiAnalysis["status"],
       } : null,
+      sourceStatus: {
+        kind: stringValue(skillRow, "source_type") as SourceType,
+        state: stringValue(skillRow, "source_type") === "local" && !nullableString(skillRow, "original_path") ? "missing" : "linked",
+        display: stringValue(skillRow, "source_display"),
+        branch: nullableString(skillRow, "source_branch"),
+        revision: nullableString(skillRow, "source_revision"),
+        lastCheckedAt: nullableString(skillRow, "source_checked_at"),
+      },
     };
   }
 
-  getInternalPaths(id: string): { libraryPath: string; originalPath: string | null; trashedPath: string | null } {
-    const row = this.db.prepare("SELECT library_path, original_path, trashed_path FROM skills WHERE id = ?").get(id) as Row | undefined;
+  getInternalPaths(id: string): { libraryPath: string; originalPath: string | null; trashedPath: string | null; sourceUrl: string | null; sourceSubpath: string | null; sourceBranch: string | null; sourceRevision: string | null } {
+    const row = this.db.prepare("SELECT library_path, original_path, trashed_path, source_url, source_subpath, source_branch, source_revision FROM skills WHERE id = ?").get(id) as Row | undefined;
     if (!row) throw new Error("未找到该 Skill。");
     return {
       libraryPath: stringValue(row, "library_path"),
       originalPath: nullableString(row, "original_path"),
       trashedPath: nullableString(row, "trashed_path"),
+      sourceUrl: nullableString(row, "source_url"),
+      sourceSubpath: nullableString(row, "source_subpath"),
+      sourceBranch: nullableString(row, "source_branch"),
+      sourceRevision: nullableString(row, "source_revision"),
     };
+  }
+
+  linkLocalSource(skillId: string, originalPath: string, sourceDisplay: string): void {
+    this.db.prepare("UPDATE skills SET original_path = ?, source_display = ?, source_checked_at = ?, updated_at = ? WHERE id = ? AND source_type = 'local'").run(
+      originalPath, sourceDisplay, new Date().toISOString(), new Date().toISOString(), skillId,
+    );
+  }
+
+  markSourceChecked(skillId: string, revision?: string | null): void {
+    this.db.prepare("UPDATE skills SET source_checked_at = ?, source_revision = COALESCE(?, source_revision) WHERE id = ?").run(new Date().toISOString(), revision || null, skillId);
+  }
+
+  updateGithubLocation(skillId: string, subpath: string, branch: string): void {
+    this.db.prepare("UPDATE skills SET source_subpath = ?, source_branch = ?, source_checked_at = ? WHERE id = ? AND source_type = 'github'")
+      .run(subpath, branch, new Date().toISOString(), skillId);
+  }
+
+  replaceSkillContent(skillId: string, name: string, description: string, files: IndexedFile[], analysis: RuleAnalysis, version?: { id: string; label: string; origin: VersionSummary["origin"]; note: string; createdAt: string; contentPath: string; fileCount: number }, sourceRevision?: string | null): void {
+    const now = new Date().toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM files WHERE skill_id = ?").run(skillId);
+      const statement = this.db.prepare(`INSERT INTO files (
+        id, skill_id, relative_path, name, extension, type, size, content_hash, previewable, is_entry_file, hidden
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      files.forEach((file) => statement.run(file.id, skillId, file.relativePath, file.name, file.extension, file.type, file.size, file.hash, file.previewable ? 1 : 0, file.isEntryFile ? 1 : 0, file.hidden ? 1 : 0));
+      this.db.prepare("DELETE FROM analyses WHERE skill_id = ?").run(skillId);
+      this.db.prepare(`INSERT INTO analyses (id, skill_id, kind, schema_version, content, source_files, created_at, status)
+        VALUES (?, ?, 'rule', ?, ?, ?, ?, 'succeeded')`).run(
+        crypto.randomUUID(), skillId, analysis.schemaVersion, JSON.stringify(analysis), JSON.stringify(files.filter((file) => file.isEntryFile).map((file) => file.relativePath)), now,
+      );
+      this.db.prepare("UPDATE skills SET name = ?, description = ?, analysis_status = 'not_started', updated_at = ?, source_revision = COALESCE(?, source_revision), source_checked_at = CASE WHEN ? IS NULL THEN source_checked_at ELSE ? END WHERE id = ?")
+        .run(name, description, now, sourceRevision || null, sourceRevision || null, now, skillId);
+      if (version) this.db.prepare(`INSERT INTO versions (id, skill_id, label, origin, note, created_at, content_path, file_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(version.id, skillId, version.label, version.origin, version.note, version.createdAt, version.contentPath, version.fileCount);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveVersion(skillId: string, version: { id: string; label: string; origin: VersionSummary["origin"]; note: string; createdAt: string; contentPath: string; fileCount: number }): void {
+    this.db.prepare(`INSERT INTO versions (id, skill_id, label, origin, note, created_at, content_path, file_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(version.id, skillId, version.label, version.origin, version.note, version.createdAt, version.contentPath, version.fileCount);
+  }
+
+  listVersions(skillId: string): VersionSummary[] {
+    return (this.db.prepare("SELECT id, label, origin, note, created_at, file_count FROM versions WHERE skill_id = ? ORDER BY created_at DESC").all(skillId) as Row[]).map((row) => ({
+      id: stringValue(row, "id"),
+      label: stringValue(row, "label"),
+      origin: stringValue(row, "origin") as VersionSummary["origin"],
+      note: stringValue(row, "note"),
+      createdAt: stringValue(row, "created_at"),
+      fileCount: Number(row.file_count || 0),
+    }));
+  }
+
+  getVersionPath(skillId: string, versionId: string): string {
+    const row = this.db.prepare("SELECT content_path FROM versions WHERE id = ? AND skill_id = ?").get(versionId, skillId) as Row | undefined;
+    if (!row) throw new Error("未找到该历史版本。");
+    return stringValue(row, "content_path");
   }
 
   replaceRuleAnalysis(skillId: string, name: string, description: string, analysis: RuleAnalysis): void {

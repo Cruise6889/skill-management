@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { AiService } from "./services/ai";
 import { SkillDatabase } from "./services/database";
 import { ImportService } from "./services/importer";
+import { WorkspaceService } from "./services/workspace";
 import type { ImportProgress, LibraryQuery } from "./shared";
 
 const currentDir = path.dirname(fileURLToPath(import.meta.url));
@@ -12,6 +13,7 @@ let mainWindow: BrowserWindow | null = null;
 let database: SkillDatabase;
 let importer: ImportService;
 let ai: AiService;
+let workspace: WorkspaceService;
 
 function safeHandler<T extends unknown[]>(handler: (...args: T) => unknown | Promise<unknown>) {
   return async (_event: Electron.IpcMainInvokeEvent, ...args: T) => {
@@ -73,6 +75,26 @@ function registerIpc(): void {
   ipcMain.handle("library:update-taxonomy", safeHandler((skillId: string, category: string | null, tags: string[]) => database.updateTaxonomy(skillId, category, tags)));
   ipcMain.handle("library:taxonomy", safeHandler(() => database.getTaxonomy()));
   ipcMain.handle("analysis:rerun-rules", safeHandler((skillId: string) => importer.rerunRules(skillId)));
+  ipcMain.handle("source:link-local", safeHandler((skillId: string) => {
+    if (!mainWindow) throw new Error("应用窗口未就绪。");
+    return workspace.linkLocalSource(mainWindow, skillId);
+  }));
+  ipcMain.handle("source:check", safeHandler((skillId: string) => workspace.checkSourceUpdate(skillId)));
+  ipcMain.handle("source:apply", safeHandler((token: string) => workspace.applySourceUpdate(token)));
+  ipcMain.handle("source:discard", safeHandler((token: string) => workspace.discardSourceUpdate(token)));
+  ipcMain.handle("source:diff-lines", safeHandler((token: string, relativePath: string) => workspace.getChangeLines(token, relativePath)));
+  ipcMain.handle("compare:skills", safeHandler((leftId: string, rightId: string) => workspace.compareSkills(leftId, rightId)));
+  ipcMain.handle("editor:get", safeHandler((skillId: string, fileId: string) => workspace.getEditableFile(skillId, fileId)));
+  ipcMain.handle("editor:prepare", safeHandler((skillId: string, fileId: string, content: string) => workspace.prepareFileEdit(skillId, fileId, content)));
+  ipcMain.handle("editor:apply", safeHandler((token: string) => workspace.applyFileEdit(token)));
+  ipcMain.handle("history:list", safeHandler((skillId: string) => workspace.listVersions(skillId)));
+  ipcMain.handle("history:diff", safeHandler((skillId: string, versionId: string) => workspace.diffVersion(skillId, versionId)));
+  ipcMain.handle("history:restore", safeHandler((skillId: string, versionId: string) => workspace.restoreVersion(skillId, versionId)));
+  ipcMain.handle("transfer:prepare", safeHandler((skillId: string, mode: "install" | "export") => {
+    if (!mainWindow) throw new Error("应用窗口未就绪。");
+    return workspace.prepareTransfer(mainWindow, skillId, mode);
+  }));
+  ipcMain.handle("transfer:apply", safeHandler((token: string, strategy: "overwrite" | "rename") => workspace.applyTransfer(token, strategy)));
   ipcMain.handle("library:remove", safeHandler(async (skillId: string) => {
     const { libraryPath } = database.getInternalPaths(skillId);
     const trashDir = path.join(app.getPath("userData"), "app-data", "trash");
@@ -98,10 +120,11 @@ function registerIpc(): void {
 app.whenReady().then(async () => {
   app.setName("Skill 拆解器");
   const dataRoot = path.join(app.getPath("userData"), "app-data");
-  await Promise.all(["library", "temp", "trash", "repositories", "logs"].map((directory) => fs.mkdir(path.join(dataRoot, directory), { recursive: true })));
+  await Promise.all(["library", "temp", "trash", "repositories", "logs", "installation-backups"].map((directory) => fs.mkdir(path.join(dataRoot, directory), { recursive: true })));
   database = new SkillDatabase(dataRoot);
   importer = new ImportService(dataRoot, database, (progress: ImportProgress) => mainWindow?.webContents.send("import:progress", progress));
   ai = new AiService(dataRoot, database);
+  workspace = new WorkspaceService(dataRoot, database);
   registerIpc();
   await createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) void createWindow(); });

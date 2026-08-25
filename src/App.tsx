@@ -7,14 +7,21 @@ import type {
   AnalysisItem,
   AnalysisSection,
   FilePreview,
+  FileChange,
   GithubPreflight,
   ImportProgress,
   IndexedFile,
   LibraryQuery,
   LocalPreflight,
+  LineChange,
+  SkillComparison,
   SkillDetail,
   SkillSummary,
   TaxonomySnapshot,
+  TransferPreview,
+  UpdatePreview,
+  VersionDiff,
+  VersionSummary,
 } from "../electron/shared";
 
 const api = window.skillExplorer;
@@ -371,6 +378,140 @@ function AiConfirmModal({ skill, onClose, onComplete, openSettings }: { skill: S
   </Modal>;
 }
 
+const CHANGE_LABELS: Record<FileChange["kind"], string> = { added: "新增", modified: "修改", deleted: "删除", unchanged: "相同" };
+
+function ChangeList({ changes, selected, onSelect }: { changes: FileChange[]; selected?: string; onSelect?: (path: string) => void }) {
+  if (!changes.length) return <div className="mini-empty compact">没有内容变化</div>;
+  return <div className="change-list">{changes.map((change) => <button key={change.relativePath} className={selected === change.relativePath ? "selected" : ""} onClick={() => onSelect?.(change.relativePath)} disabled={!onSelect}>
+    <span className={`change-badge ${change.kind}`}>{CHANGE_LABELS[change.kind]}</span><strong>{change.relativePath}</strong><small>{change.oldSize === null ? "—" : formatBytes(change.oldSize)} → {change.newSize === null ? "—" : formatBytes(change.newSize)}</small>
+  </button>)}</div>;
+}
+
+function LineDiffView({ lines }: { lines: LineChange[] }) {
+  const changed = lines.filter((line) => line.kind !== "context");
+  if (!changed.length) return <div className="mini-empty compact">文件内容相同</div>;
+  const visible = lines.filter((line, index) => line.kind !== "context" || lines.slice(Math.max(0, index - 3), index + 4).some((nearby) => nearby.kind !== "context"));
+  return <div className="line-diff">{visible.map((line, index) => <div className={line.kind} key={`${line.oldLine}-${line.newLine}-${index}`}><span>{line.oldLine ?? ""}</span><span>{line.newLine ?? ""}</span><b>{line.kind === "added" ? "+" : line.kind === "deleted" ? "−" : " "}</b><code>{line.content || " "}</code></div>)}</div>;
+}
+
+function UpdateModal({ skill, onClose, onApplied }: { skill: SkillDetail; onClose: () => void; onApplied: (detail: SkillDetail) => void }) {
+  const [preview, setPreview] = useState<UpdatePreview | null>(null);
+  const [selected, setSelected] = useState("");
+  const [lines, setLines] = useState<LineChange[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [error, setError] = useState("");
+  const tokenRef = useRef("");
+  const inspectStartedRef = useRef(false);
+
+  useEffect(() => { tokenRef.current = preview?.token || ""; }, [preview]);
+  useEffect(() => () => { if (tokenRef.current) void api.discardSourceUpdate(tokenRef.current); }, []);
+
+  async function inspect(relink = false) {
+    setLoading(true); setError(""); setPreview(null); setLines([]);
+    try {
+      if (tokenRef.current) await api.discardSourceUpdate(tokenRef.current);
+      const result = relink ? await api.linkLocalSource(skill.id) : await api.checkSourceUpdate(skill.id);
+      if (!result) { onClose(); return; }
+      setPreview(result); setSelected(result.changes[0]?.relativePath || "");
+    } catch (reason) { setError(cleanError(reason)); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { if (inspectStartedRef.current) return; inspectStartedRef.current = true; void inspect(false); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!preview || !selected) { setLines([]); return; }
+    void api.getChangeLines(preview.token, selected).then(setLines).catch(() => setLines([]));
+  }, [preview, selected]);
+
+  async function apply() {
+    if (!preview) return;
+    setApplying(true); setError("");
+    try { onApplied(await api.applySourceUpdate(preview.token)); }
+    catch (reason) { setError(cleanError(reason)); setApplying(false); }
+  }
+
+  return <Modal title="来源更新" eyebrow={skill.sourceType === "github" ? "手动检查 GitHub" : "关联原始目录"} onClose={onClose} wide>
+    <div className="source-status-card"><span className={skill.sourceType}>{skill.sourceType === "github" ? "GH" : "⌘"}</span><div><strong>{skill.sourceStatus.display}</strong><small>{skill.sourceStatus.branch ? `${skill.sourceStatus.branch} · ` : ""}{skill.sourceStatus.revision ? skill.sourceStatus.revision.slice(0, 9) : "本机只读来源"}</small></div>{skill.sourceType === "local" && <button className="button ghost" onClick={() => inspect(true)}>重新关联</button>}</div>
+    {loading && <div className="working-state compact"><span className="spinner"/><h3>{skill.sourceType === "github" ? "正在安全克隆并对比…" : "正在读取来源并对比…"}</h3></div>}
+    {preview && <><div className="change-summary"><div><strong>{preview.summary.added}</strong><small>新增</small></div><div><strong>{preview.summary.modified}</strong><small>修改</small></div><div><strong>{preview.summary.deleted}</strong><small>删除</small></div></div>
+      {preview.changes.length ? <div className="diff-layout"><ChangeList changes={preview.changes} selected={selected} onSelect={setSelected}/><LineDiffView lines={lines}/></div> : <div className="up-to-date"><span>✓</span><h3>已是最新内容</h3><p>资料库副本与当前来源一致。</p></div>}
+      <p className="privacy-note"><span>↻</span> 更新只写入资料库副本；应用前会保留完整版本快照，原始目录和 GitHub 仓库不会被修改。</p></>}
+    {error && <div className="error-box"><p>{error}</p>{skill.sourceType === "local" && <button className="text-button" onClick={() => inspect(true)}>选择新的原始目录</button>}</div>}
+    <div className="modal-actions"><button className="button secondary" onClick={onClose}>关闭</button>{preview?.changes.length ? <button className="button primary" disabled={applying} onClick={apply}>{applying ? "正在更新…" : "应用全部变更"}</button> : error ? <button className="button primary" onClick={() => inspect(false)}>重试</button> : null}</div>
+  </Modal>;
+}
+
+function CompareModal({ skill, onClose }: { skill: SkillDetail; onClose: () => void }) {
+  const [options, setOptions] = useState<SkillSummary[]>([]);
+  const [rightId, setRightId] = useState("");
+  const [comparison, setComparison] = useState<SkillComparison | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.listSkills().then((items) => { const rest = items.filter((item) => item.id !== skill.id); setOptions(rest); setRightId(rest[0]?.id || ""); }); }, [skill.id]);
+  async function compare() { try { setComparison(await api.compareSkills(skill.id, rightId)); setError(""); } catch (reason) { setError(cleanError(reason)); } }
+  return <Modal title="Skill 对比" eyebrow="规则拆解并排比较" onClose={onClose} wide>
+    <div className="compare-picker"><div><small>基准 Skill</small><strong>{skill.name}</strong></div><span>⇄</span><label><small>对比 Skill</small><select value={rightId} onChange={(event) => { setRightId(event.target.value); setComparison(null); }}>{options.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><button className="button primary" disabled={!rightId} onClick={compare}>开始对比</button></div>
+    {!options.length && <div className="mini-empty compact">资料库中还没有第二个 Skill。</div>}
+    {comparison && <div className="comparison-results"><div className="comparison-head"><div><strong>{comparison.left.name}</strong><small>{comparison.left.fileCount} 文件</small></div><div><strong>{comparison.right.name}</strong><small>{comparison.right.fileCount} 文件</small></div></div>{comparison.sections.map((section) => <section key={section.section}><h3>{SECTION_LABELS[section.section]}</h3>{section.shared.length > 0 && <div className="shared-findings"><small>共同点</small>{section.shared.map((item) => <p key={item}>{item}</p>)}</div>}<div className="comparison-columns"><ul>{section.left.map((item) => <li key={item}>{item}</li>)}</ul><ul>{section.right.map((item) => <li key={item}>{item}</li>)}</ul></div></section>)}</div>}
+    {error && <div className="error-box"><p>{error}</p></div>}
+  </Modal>;
+}
+
+function EditorModal({ skill, file, onClose, onApplied }: { skill: SkillDetail; file: IndexedFile; onClose: () => void; onApplied: (detail: SkillDetail) => void }) {
+  const [content, setContent] = useState("");
+  const [preview, setPreview] = useState<{ token: string; lines: LineChange[] } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.getEditableFile(skill.id, file.id).then((result) => setContent(result.content)).catch((reason) => setError(cleanError(reason))).finally(() => setLoading(false)); }, [skill.id, file.id]);
+  async function prepare() { try { const result = await api.prepareFileEdit(skill.id, file.id, content); setPreview(result); setError(""); } catch (reason) { setError(cleanError(reason)); } }
+  async function apply() { if (!preview) return; try { onApplied(await api.applyFileEdit(preview.token)); } catch (reason) { setError(cleanError(reason)); } }
+  return <Modal title={preview ? "确认文件变更" : "在线编辑"} eyebrow={file.relativePath} onClose={onClose} wide>
+    {loading ? <div className="working-state compact"><span className="spinner"/></div> : preview ? <LineDiffView lines={preview.lines}/> : <textarea className="code-editor" spellCheck={false} value={content} onChange={(event) => setContent(event.target.value)} />}
+    <p className="privacy-note"><span>✎</span> 编辑仅作用于资料库副本；保存会重新索引、运行规则拆解并创建历史版本。</p>
+    {error && <div className="error-box"><p>{error}</p></div>}
+    <div className="modal-actions"><button className="button secondary" onClick={preview ? () => setPreview(null) : onClose}>{preview ? "返回编辑" : "取消"}</button><button className="button primary" disabled={loading} onClick={preview ? apply : prepare}>{preview ? "确认保存" : "预览变更"}</button></div>
+  </Modal>;
+}
+
+function HistoryModal({ skill, onClose, onRestored }: { skill: SkillDetail; onClose: () => void; onRestored: (detail: SkillDetail) => void }) {
+  const [versions, setVersions] = useState<VersionSummary[]>([]);
+  const [selected, setSelected] = useState("");
+  const [diff, setDiff] = useState<VersionDiff | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.listVersions(skill.id).then((items) => { setVersions(items); setSelected(items[0]?.id || ""); }); }, [skill.id]);
+  useEffect(() => { if (selected) void api.diffVersion(skill.id, selected).then(setDiff).catch((reason) => setError(cleanError(reason))); }, [skill.id, selected]);
+  async function restore() { if (!selected || !window.confirm("恢复这个版本？当前内容会先保留为历史快照。")) return; try { onRestored(await api.restoreVersion(skill.id, selected)); } catch (reason) { setError(cleanError(reason)); } }
+  return <Modal title="历史版本" eyebrow="每次内容变更均可追溯" onClose={onClose} wide>
+    <div className="history-layout"><div className="version-list">{versions.map((version) => <button className={selected === version.id ? "selected" : ""} key={version.id} onClick={() => setSelected(version.id)}><strong>{version.label}</strong><small>{formatDate(version.createdAt)} · {version.fileCount} 文件</small><p>{version.note}</p></button>)}</div><div className="history-diff"><h3>与当前版本相比</h3>{diff && <ChangeList changes={diff.changes}/>}</div></div>
+    {error && <div className="error-box"><p>{error}</p></div>}
+    <div className="modal-actions"><button className="button secondary" onClick={onClose}>关闭</button><button className="button primary" disabled={!selected || !diff?.changes.length} onClick={restore}>恢复此版本</button></div>
+  </Modal>;
+}
+
+function TransferModal({ skill, mode, onClose, setToast }: { skill: SkillDetail; mode: "install" | "export"; onClose: () => void; setToast: (message: string) => void }) {
+  const [preview, setPreview] = useState<TransferPreview | null>(null);
+  const [strategy, setStrategy] = useState<"overwrite" | "rename">("rename");
+  const [error, setError] = useState("");
+  const chooserStartedRef = useRef(false);
+  useEffect(() => { if (chooserStartedRef.current) return; chooserStartedRef.current = true; void api.prepareTransfer(skill.id, mode).then((result) => { if (result) setPreview(result); else onClose(); }).catch((reason) => setError(cleanError(reason))); }, [skill.id, mode]); // eslint-disable-line react-hooks/exhaustive-deps
+  async function apply() { if (!preview) return; try { const result = await api.applyTransfer(preview.token, preview.targetExists ? strategy : "overwrite"); setToast(`${mode === "install" ? "已安装到" : "已导出到"} ${result.destinationDisplay}`); onClose(); } catch (reason) { setError(cleanError(reason)); } }
+  return <Modal title={mode === "install" ? "安装 Skill" : "导出 Skill"} eyebrow="写入前冲突预览" onClose={onClose} wide>
+    {!preview && !error && <div className="working-state compact"><span className="spinner"/><h3>等待选择目标目录…</h3></div>}
+    {preview && <><div className="transfer-destination"><small>目标位置</small><strong>{preview.targetDisplay}/{preview.folderName}</strong><span>{preview.targetExists ? `${preview.conflicts} 个冲突` : "新目录"}</span></div><ChangeList changes={preview.changes.slice(0, 120)}/>{preview.targetExists && <div className="strategy-picker"><label><input type="radio" checked={strategy === "rename"} onChange={() => setStrategy("rename")}/><span><strong>保留两份（推荐）</strong><small>自动使用新的目录名，不触碰现有 Skill</small></span></label><label><input type="radio" checked={strategy === "overwrite"} onChange={() => setStrategy("overwrite")}/><span><strong>覆盖目标</strong><small>现有目录先移入应用备份区，再写入完整副本</small></span></label></div>}<p className="privacy-note"><span>✓</span> 只复制文件，不运行目标 Skill 中的脚本、Hook 或安装命令。</p></>}
+    {error && <div className="error-box"><p>{error}</p></div>}
+    <div className="modal-actions"><button className="button secondary" onClick={onClose}>取消</button><button className="button primary" disabled={!preview} onClick={apply}>{mode === "install" ? "确认安装" : "确认导出"}</button></div>
+  </Modal>;
+}
+
+function ReferenceGraphModal({ skill, onClose, onOpenFile }: { skill: SkillDetail; onClose: () => void; onOpenFile: (path: string) => void }) {
+  const paths = [...new Set(skill.ruleAnalysis.references.flatMap((item) => [item.sourcePath, item.resolvedPath].filter(Boolean) as string[]))];
+  const width = 680; const height = Math.max(260, paths.length * 52);
+  const position = new Map(paths.map((item, index) => [item, { x: index % 2 ? 430 : 70, y: 38 + index * 46 }]));
+  return <Modal title="文件引用图" eyebrow={`${paths.length} 个节点 · ${skill.ruleAnalysis.references.length} 条引用`} onClose={onClose} wide>
+    {paths.length ? <div className="reference-graph"><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Skill 文件引用关系图"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z"/></marker></defs>{skill.ruleAnalysis.references.map((edge, index) => { const from = position.get(edge.sourcePath); const to = edge.resolvedPath ? position.get(edge.resolvedPath) : null; return from && to ? <line key={index} x1={from.x + 150} y1={from.y} x2={to.x} y2={to.y} markerEnd="url(#arrow)"/> : null; })}{paths.map((item) => { const point = position.get(item)!; return <g key={item} transform={`translate(${point.x},${point.y - 18})`} onClick={() => onOpenFile(item)} role="button"><rect width="150" height="36" rx="7"/><text x="10" y="22">{item.length > 22 ? `…${item.slice(-21)}` : item}</text></g>; })}</svg></div> : <div className="mini-empty">当前规则解析没有发现可绘制的文件引用。</div>}
+  </Modal>;
+}
+
 export default function App() {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [taxonomy, setTaxonomy] = useState<TaxonomySnapshot>({ categories: [], tags: [] });
@@ -388,7 +529,14 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [transferMode, setTransferMode] = useState<"install" | "export" | null>(null);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [sidebarListScope, setSidebarListScope] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [removedSkill, setRemovedSkill] = useState<{ id: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -400,6 +548,7 @@ export default function App() {
   const previewBodyRef = useRef<HTMLDivElement>(null);
   const analysisAnchorsRef = useRef(new Map<string, HTMLElement>());
   const detailGridRef = useRef<HTMLElement>(null);
+  const detailRequestRef = useRef(0);
 
   const loadLibrary = useCallback(async (nextQuery: LibraryQuery) => {
     try {
@@ -472,19 +621,38 @@ export default function App() {
   }
 
   function togglePane(side: "files" | "analysis") {
+    if (window.matchMedia("(max-width: 940px)").matches) {
+      setMobilePane("preview");
+      return;
+    }
     setCollapsedPanes((previous) => ({ ...previous, [side]: !previous[side] }));
   }
 
   async function openDetail(skillOrId: SkillDetail | string) {
-    setBusy(true); setError("");
+    const requestId = detailRequestRef.current + 1;
+    detailRequestRef.current = requestId;
+    const isInitialOpen = current === null;
+    if (isInitialOpen) setBusy(true);
+    setError("");
     try {
       const detail = typeof skillOrId === "string" ? await api.getSkill(skillOrId) : skillOrId;
+      if (requestId !== detailRequestRef.current) return;
       setCurrent(detail);
       const entry = detail.files.find((file) => file.isEntryFile) || detail.files.find((file) => file.previewable) || detail.files[0] || null;
-      setSelectedFile(entry); setFileSearch(""); setAnalysisTab("rule"); setMobilePane("analysis"); setFocusLine(null);
-      if (entry) setPreview(await api.getFilePreview(detail.id, entry.id));
-    } catch (reason) { setError(cleanError(reason)); }
-    finally { setBusy(false); }
+      setPreview(null); setSelectedFile(entry); setFileSearch(""); setAnalysisTab("rule"); setMobilePane("analysis"); setFocusLine(null);
+      if (entry) {
+        const nextPreview = await api.getFilePreview(detail.id, entry.id);
+        if (requestId === detailRequestRef.current) setPreview(nextPreview);
+      }
+    } catch (reason) { if (requestId === detailRequestRef.current) setError(cleanError(reason)); }
+    finally { if (isInitialOpen && requestId === detailRequestRef.current) setBusy(false); }
+  }
+
+  function acceptContentChange(detail: SkillDetail, message: string) {
+    setUpdateOpen(false); setEditorOpen(false); setHistoryOpen(false);
+    setToast(message);
+    void loadLibrary({ ...query, search });
+    void openDetail(detail);
   }
 
   async function chooseFile(file: IndexedFile, line: number | null = null) {
@@ -577,6 +745,16 @@ export default function App() {
 
   const filteredFiles = useMemo(() => current?.files.filter((file) => file.relativePath.toLowerCase().includes(fileSearch.toLowerCase())) || [], [current, fileSearch]);
   const shownSections = useMemo(() => Object.keys(SECTION_LABELS) as AnalysisSection[], []);
+  const sidebarListTitle = query.favoritesOnly ? "收藏的 Skill" : query.category && query.category !== "all" ? `分类 · ${query.category}` : search ? `标签 / 搜索 · ${search}` : "全部 Skill";
+
+  function toggleSidebarList(scope: string, applyFilter: () => void) {
+    if (sidebarListScope === scope) {
+      setSidebarListScope(null);
+      return;
+    }
+    applyFilter();
+    setSidebarListScope(scope);
+  }
 
   function forwardDetailWheel(event: WheelEvent<HTMLElement>) {
     const target = event.target instanceof HTMLElement ? event.target : null;
@@ -612,15 +790,16 @@ export default function App() {
         <span className="brand-mark">S<span>/</span></span><div><strong>Skill 拆解器</strong><small>Skill Explorer</small></div>
       </div>
       <nav className="main-nav" aria-label="资料库导航">
-        <button className={!query.favoritesOnly && !query.category ? "active" : ""} onClick={() => setQuery({ ...query, favoritesOnly: false, category: "all" })}><span>◫</span>全部 Skill<em>{skills.length}</em></button>
-        <button className={query.favoritesOnly ? "active" : ""} onClick={() => setQuery({ ...query, favoritesOnly: true, category: "all" })}><span>☆</span>收藏</button>
+        <button className={!query.favoritesOnly && (!query.category || query.category === "all") && !search ? "active" : ""} aria-expanded={sidebarListScope === "all"} onClick={() => toggleSidebarList("all", () => { setSearch(""); setQuery({ ...query, favoritesOnly: false, category: "all" }); })}><span>◫</span>全部 Skill<em>{skills.length}</em></button>
+        <button className={query.favoritesOnly ? "active" : ""} aria-expanded={sidebarListScope === "favorites"} onClick={() => toggleSidebarList("favorites", () => { setSearch(""); setQuery({ ...query, favoritesOnly: true, category: "all" }); })}><span>☆</span>收藏</button>
       </nav>
-      <div className="nav-section"><div className="nav-label"><span>分类</span></div>{taxonomy.categories.length ? taxonomy.categories.map((category) => <button key={category} className={query.category === category ? "active" : ""} onClick={() => setQuery({ ...query, category, favoritesOnly: false })}><span className="folder-glyph"/>{category}</button>) : <p>导入后可添加分类</p>}</div>
-      <div className="nav-section tags"><div className="nav-label"><span>标签</span></div>{taxonomy.tags.slice(0, 8).map((tag) => <button key={tag} onClick={() => setSearch(tag)}><span>#</span>{tag}</button>)}</div>
+      <div className="nav-section"><div className="nav-label"><span>分类</span></div>{taxonomy.categories.length ? taxonomy.categories.map((category) => <button key={category} className={query.category === category ? "active" : ""} aria-expanded={sidebarListScope === `category:${category}`} onClick={() => toggleSidebarList(`category:${category}`, () => { setSearch(""); setQuery({ ...query, category, favoritesOnly: false }); })}><span className="folder-glyph"/>{category}</button>) : <p>导入后可添加分类</p>}</div>
+      <div className="nav-section tags"><div className="nav-label"><span>标签</span></div>{taxonomy.tags.slice(0, 8).map((tag) => <button key={tag} className={search === tag ? "active" : ""} aria-expanded={sidebarListScope === `tag:${tag}`} onClick={() => toggleSidebarList(`tag:${tag}`, () => { setSearch(tag); setQuery({ ...query, category: "all", favoritesOnly: false }); })}><span>#</span>{tag}</button>)}</div>
+      {sidebarListScope && <section className="sidebar-skill-results" aria-label={`${sidebarListTitle}列表`}><div><span>{sidebarListTitle}</span><em>{skills.length}</em></div><nav>{skills.length ? skills.map((skill) => <button key={skill.id} onClick={() => void openDetail(skill.id)} title={skill.name}><span className={`format-icon ${skill.sourceType}`}>{skill.sourceType === "github" ? "GH" : "S"}</span><strong>{skill.name}</strong></button>) : <p>暂无匹配的 Skill</p>}</nav></section>}
       <div className="sidebar-foot"><div className="privacy-pill"><span>●</span><div><strong>本地优先</strong><small>未经确认不上传</small></div></div><button className="settings-button" onClick={() => setSettingsOpen(true)} aria-label="设置">⚙</button></div>
     </aside>
 
-    <main className="workspace">
+    <main className={`workspace ${current ? "detail-workspace" : "library-workspace"}`}>
       {!current ? <>
         <header className="topbar drag-region"><div className="search-wrap no-drag"><span>⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索名称、描述、路径或标签…" />{search && <button onClick={() => setSearch("")} aria-label="清空">×</button>}</div><span className="result-count">{skills.length} 个结果</span><button className="button primary no-drag" onClick={() => setImportOpen(true)}><span>+</span> 导入 Skill</button></header>
         <section className="library-view">
@@ -635,10 +814,10 @@ export default function App() {
           </article>)}</div> : <div className="empty-state"><span className="empty-graphic"><i/><b>S</b><em/></span><span className="eyebrow">3 分钟内看懂陌生 Skill</span><h2>{search || query.favoritesOnly ? "没有匹配的 Skill" : "从导入第一个 Skill 开始"}</h2><p>{search || query.favoritesOnly ? "试试清空搜索或调整筛选条件。" : "本地规则先完成基础拆解，不联网、不使用 API，也不修改原文件。"}</p>{search || query.favoritesOnly ? <button className="button secondary" onClick={() => { setSearch(""); setQuery({ sourceType: "all", aiStatus: "all" }); }}>清除条件</button> : <button className="button primary" onClick={() => setImportOpen(true)}>+ 导入 Skill</button>}</div>}
         </section>
       </> : <>
-        <header className="detail-header drag-region"><button className="back-button no-drag" onClick={() => { setCurrent(null); setPreview(null); }} aria-label="返回">←</button><div className="detail-identity"><div className={`format-icon ${current.sourceType}`}>{current.sourceType === "github" ? "GH" : "S"}</div><div><div className="title-line"><h1>{current.name}</h1><span>{current.format === "codex" ? "Codex Skill" : "自定义格式"}</span></div><p>{current.sourceDisplay} · 导入于 {formatDate(current.importedAt)}</p></div></div><div className="detail-actions no-drag"><button className={`favorite standalone ${current.isFavorite ? "on" : ""}`} onClick={() => toggleFavorite(current)} aria-label="收藏">☆</button><button className="button secondary" onClick={() => setTaxonomyOpen(true)}># 分类与标签</button><button className="button primary ai-button" onClick={() => setAiOpen(true)}><span>✦</span> AI 深度拆解</button><div className="more-wrap"><button className="icon-button bordered" onClick={() => setMoreOpen(!moreOpen)} aria-label="更多">…</button>{moreOpen && <div className="more-menu"><button onClick={rerunRules}>↻ 重新规则拆解</button><button onClick={resetPaneWidths}>↔ 重置三栏宽度</button><button className="danger" onClick={removeCurrent}>⊘ 从资料库移除</button></div>}</div></div></header>
+        <header className="detail-header drag-region"><button className="back-button no-drag" onClick={() => { setCurrent(null); setPreview(null); }} aria-label="返回">←</button><div className="detail-identity"><div className={`format-icon ${current.sourceType}`}>{current.sourceType === "github" ? "GH" : "S"}</div><div><div className="title-line"><h1>{current.name}</h1><span>{current.format === "codex" ? "Codex Skill" : "自定义格式"}</span></div><p>{current.sourceDisplay} · 导入于 {formatDate(current.importedAt)}</p></div></div><div className="detail-actions no-drag"><button className={`favorite standalone ${current.isFavorite ? "on" : ""}`} onClick={() => toggleFavorite(current)} aria-label="收藏">☆</button><button className="button secondary" onClick={() => setTaxonomyOpen(true)}># 分类与标签</button><button className="button primary ai-button" onClick={() => setAiOpen(true)}><span>✦</span> AI 深度拆解</button><div className="more-wrap"><button className="icon-button bordered" onClick={() => setMoreOpen(!moreOpen)} aria-label="更多">…</button>{moreOpen && <div className="more-menu v2-menu"><span>内容</span><button onClick={() => { setMoreOpen(false); setUpdateOpen(true); }}>↻ 检查来源更新</button><button onClick={() => { setMoreOpen(false); setHistoryOpen(true); }}>◷ 历史版本</button><button onClick={rerunRules}>⌁ 重新规则拆解</button><span>研究</span><button onClick={() => { setMoreOpen(false); setCompareOpen(true); }}>⇄ Skill 对比</button><button onClick={() => { setMoreOpen(false); setGraphOpen(true); }}>⌘ 文件引用图</button><span>分发</span><button onClick={() => { setMoreOpen(false); setTransferMode("install"); }}>↓ 安装到目标目录</button><button onClick={() => { setMoreOpen(false); setTransferMode("export"); }}>↗ 导出副本</button><span>视图</span><button onClick={resetPaneWidths}>↔ 重置三栏宽度</button><button className="danger" onClick={removeCurrent}>⊘ 从资料库移除</button></div>}</div></div></header>
         <div className="mobile-tabs"><button className={mobilePane === "files" ? "active" : ""} onClick={() => setMobilePane("files")}>文件</button><button className={mobilePane === "preview" ? "active" : ""} onClick={() => setMobilePane("preview")}>预览</button><button className={mobilePane === "analysis" ? "active" : ""} onClick={() => setMobilePane("analysis")}>拆解</button></div>
         <section className={`detail-grid ${isResizing ? "is-resizing" : ""} ${collapsedPanes.files ? "files-collapsed" : ""} ${collapsedPanes.analysis ? "analysis-collapsed" : ""}`} ref={detailGridRef} style={{ "--file-pane-width": collapsedPanes.files ? "34px" : `${paneWidths.files}px`, "--analysis-pane-width": collapsedPanes.analysis ? "34px" : `${paneWidths.analysis}px`, "--left-resizer-width": collapsedPanes.files ? "0px" : "8px", "--right-resizer-width": collapsedPanes.analysis ? "0px" : "8px" } as CSSProperties} onWheelCapture={forwardDetailWheel}>
-          <aside className={`file-pane mobile-${mobilePane === "files" ? "show" : "hide"} ${collapsedPanes.files ? "pane-collapsed" : ""}`}><button className="pane-reopen" onClick={() => togglePane("files")} aria-label="展开目录" title="展开目录">›</button><div className="pane-title"><div><span>目录</span><em>{current.files.length}</em></div><div className="pane-title-actions"><button title="文件只读">⌘</button><button className="pane-collapse-button" onClick={() => togglePane("files")} aria-label="收起目录" title="收起目录">‹</button></div></div><label className="file-search"><span>⌕</span><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件…" /></label><div className="file-list">{filteredFiles.map((file) => <button key={file.id} className={selectedFile?.id === file.id ? "selected" : ""} style={{ paddingLeft: `${18 + Math.min(3, file.relativePath.split("/").length - 1) * 14}px` }} onClick={() => chooseFile(file)}><span className={`file-type ${file.type}`}>{fileIcon(file)}</span><span><strong>{file.name}</strong>{file.relativePath.includes("/") && <small>{file.relativePath.slice(0, -file.name.length - 1)}</small>}</span>{file.isEntryFile && <em>入口</em>}</button>)}</div><footer><span>●</span>只读副本 · 不执行脚本</footer></aside>
+          <aside className={`file-pane mobile-${mobilePane === "files" ? "show" : "hide"} ${collapsedPanes.files ? "pane-collapsed" : ""}`}><button className="pane-reopen" onClick={() => togglePane("files")} aria-label="展开目录" title="展开目录">›</button><div className="pane-title"><div><span>目录</span><em>{current.files.length}</em></div><div className="pane-title-actions"><span className="pane-readonly-indicator" title="编辑只写入资料库副本；原始目录和 GitHub 来源保持不变" aria-label="资料库副本">只读</span><button className="pane-edit-button" disabled={!selectedFile?.previewable || selectedFile.type === "image" || selectedFile.type === "binary"} onClick={() => setEditorOpen(true)} title={selectedFile?.previewable && selectedFile.type !== "image" && selectedFile.type !== "binary" ? "编辑当前文件" : "当前文件不支持编辑"}>编辑</button><button className="pane-collapse-button" onClick={() => togglePane("files")} aria-label="收起目录" title="收起目录">‹</button></div></div><label className="file-search"><span>⌕</span><input value={fileSearch} onChange={(event) => setFileSearch(event.target.value)} placeholder="搜索文件…" /></label><div className="file-list">{filteredFiles.map((file) => <button key={file.id} className={selectedFile?.id === file.id ? "selected" : ""} style={{ paddingLeft: `${18 + Math.min(3, file.relativePath.split("/").length - 1) * 14}px` }} onClick={() => chooseFile(file)}><span className={`file-type ${file.type}`}>{fileIcon(file)}</span><span><strong>{file.name}</strong>{file.relativePath.includes("/") && <small>{file.relativePath.slice(0, -file.name.length - 1)}</small>}</span>{file.isEntryFile && <em>入口</em>}</button>)}</div><footer><span>●</span>只读副本 · 不执行脚本</footer></aside>
           <div className="pane-resizer left-resizer" role="separator" aria-orientation="vertical" aria-label="调整目录栏宽度；双击恢复默认" tabIndex={0} onPointerDown={(event) => startPaneResize("files", event)} onDoubleClick={resetPaneWidths} onKeyDown={(event) => handleResizerKeyDown("files", event)}><span/></div>
           <section className={`preview-pane mobile-${mobilePane === "preview" ? "show" : "hide"}`}><div className="pane-title preview-title"><div className="breadcrumbs"><span>{current.name}</span><b>/</b><strong>{selectedFile?.relativePath || "未选文件"}</strong></div>{selectedFile?.type === "markdown" && <div className="segmented"><button className={renderMarkdown ? "active" : ""} onClick={() => { setRenderMarkdown(true); setFocusLine(null); }}>阅读</button><button className={!renderMarkdown ? "active" : ""} onClick={() => setRenderMarkdown(false)}>原文</button></div>}</div>
             <div className="preview-body" ref={previewBodyRef} tabIndex={0} aria-label="文件正文，可使用触控板、鼠标滚轮或方向键滚动" onKeyDown={scrollPreviewFromKeyboard}>{!selectedFile ? <div className="mini-empty">从左侧选择文件</div> : !preview ? <div className="working-state compact"><span className="spinner"/><p>读取中…</p></div> : preview.dataUrl ? <div className="image-preview"><img src={preview.dataUrl} alt={preview.relativePath}/></div> : preview.content !== null ? (preview.type === "markdown" && renderMarkdown ? <MarkdownPreview content={preview.content} focusLine={focusLine} onHeadingClick={revealAnalysisForHeading}/> : <SourcePreview content={preview.content} focusLine={focusLine}/>) : <div className="unsupported"><span>{fileIcon(selectedFile)}</span><h3>MVP 暂不预览此格式</h3><p>{selectedFile.extension.toUpperCase() || "未知格式"} · {formatBytes(selectedFile.size)}</p></div>}{preview?.truncated && <div className="truncated-note">文件较大，当前仅展示前 {formatBytes(512 * 1024)}。</div>}</div>
@@ -660,6 +839,12 @@ export default function App() {
     {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} setToast={setToast}/>}
     {aiOpen && current && <AiConfirmModal skill={current} onClose={() => setAiOpen(false)} openSettings={() => { setAiOpen(false); setSettingsOpen(true); }} onComplete={(detail) => { setCurrent(detail); setAiOpen(false); setAnalysisTab("ai"); setToast("AI 深度拆解已完成"); }}/>}
     {taxonomyOpen && current && <TaxonomyModal skill={current} existing={taxonomy} onClose={() => setTaxonomyOpen(false)} onSave={saveTaxonomy}/>}
+    {updateOpen && current && <UpdateModal skill={current} onClose={() => setUpdateOpen(false)} onApplied={(detail) => acceptContentChange(detail, "来源更新已应用并创建版本快照")}/>}
+    {compareOpen && current && <CompareModal skill={current} onClose={() => setCompareOpen(false)}/>}
+    {editorOpen && current && selectedFile && <EditorModal skill={current} file={selectedFile} onClose={() => setEditorOpen(false)} onApplied={(detail) => acceptContentChange(detail, "文件已保存，规则拆解已更新")}/>}
+    {historyOpen && current && <HistoryModal skill={current} onClose={() => setHistoryOpen(false)} onRestored={(detail) => acceptContentChange(detail, "历史版本已恢复")}/>}
+    {transferMode && current && <TransferModal skill={current} mode={transferMode} onClose={() => setTransferMode(null)} setToast={setToast}/>}
+    {graphOpen && current && <ReferenceGraphModal skill={current} onClose={() => setGraphOpen(false)} onOpenFile={(relativePath) => { const file = current.files.find((item) => item.relativePath === relativePath); if (file) { setGraphOpen(false); void chooseFile(file); } }}/>}
     {toast && <button className="toast" onClick={removedSkill ? undoToast : undefined}>{toast}</button>}
   </div>;
 }

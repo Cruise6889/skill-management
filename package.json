@@ -1,0 +1,72 @@
+{
+  "name": "skill-explorer",
+  "version": "0.1.2",
+  "private": true,
+  "description": "本地优先的 Agent Skill 拆解与资料库工具",
+  "main": "out/main/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "build:icon": "qlmanage -t -s 1024 -o build build/icon.svg && python3 build/remove-icon-border.py && sh build/create-iconset.sh",
+    "package:mac": "npm run package:mac:testing",
+    "package:mac:testing": "npm run build:icon && npm run build && electron-builder --mac --dir --arm64",
+    "dist:mac": "npm run dist:mac:testing",
+    "dist:mac:testing": "npm run build:icon && npm run build && electron-builder --mac --dir --arm64 && node build/create-testing-zip.cjs",
+    "preview": "electron-vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint electron src tests"
+  },
+  "dependencies": {
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "5.1.4",
+    "electron": "38.7.2",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "5.0.0",
+    "eslint": "9.39.4",
+    "eslint-plugin-react-hooks": "7.0.1",
+    "eslint-plugin-react-refresh": "0.5.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.3",
+    "vite": "7.2.7"
+  },
+  "build": {
+    "appId": "com.cruise.skill-explorer",
+    "productName": "Skill 拆解器",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "Skill 拆解器"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # Skill 拆解器
 
-一个本地优先的 macOS 桌面应用，用于导入、浏览、拆解和整理 Agent Skill。
+一个本地优先的桌面应用，用于导入、浏览、拆解和整理 Agent Skill。当前提供 macOS Apple 芯片版与 Windows x64 版。
 
 ## 运行
 
@@ -30,9 +30,24 @@ npm run dist:mac
 
 面向其他用户正式分发前，仍需使用 Apple Developer 证书完成 Developer ID 签名与公证。
 
-## GitHub 仓库约定
+## Windows 打包
 
-建议先将仓库设为私有。仓库只保存可复现构建所需的源码、测试、构建脚本和文档；以下内容被 `.gitignore` 排除，不能上传：
+在 Windows x64 电脑上生成 NSIS 安装程序：
+
+```powershell
+npm ci
+npm run dist:win
+```
+
+安装程序生成在 `release/`，文件名类似 `Skill 拆解器-<版本>-x64.exe`。安装时可选择目标目录，并创建桌面与开始菜单快捷方式。
+
+普通 Windows 用户只需从 GitHub Releases 下载 `.exe` 并双击安装，无需安装 Node.js。未进行 Windows 代码签名的测试版可能出现 SmartScreen 提示；请仅从本仓库 Releases 下载。正式公开分发前，建议使用 Windows 代码签名证书签名安装程序。
+
+仓库还提供 GitHub Actions 工作流：发布 GitHub Release 时会在 Windows 环境构建并自动附加 `.exe` 安装包；手动运行工作流时，安装包会作为 Actions Artifact 保存。
+
+## GitHub 公开仓库约定
+
+仓库只保存可复现构建所需的源码、测试、构建脚本和文档；以下内容被 `.gitignore` 排除，不能上传：
 
 - API Key、`.env` 文件、证书请求、签名证书与私钥；
 - 本地数据库、日志、Electron/Vite 缓存与依赖目录；
@@ -52,7 +67,7 @@ AI Key 不会写入项目源码或 Git 仓库。应用在 macOS 上使用 Electr
 
 所有会改变资料库或目标目录的操作都采用“预览 → 明确确认 → 写入”的流程。来源同步不会反向修改原始目录，安装与导出不会执行 Skill 内容。
 
-如需向测试者分发版本，请在 GitHub Releases 中单独上传 `release/` 生成的 ZIP、对应 `.sha256` 校验文件和 `内测安装说明.txt`；不要把安装包提交进 Git。
+如需向测试者分发版本，请在 GitHub Releases 中单独上传 macOS ZIP、对应 `.sha256` 校验文件、`内测安装说明.txt` 和 Windows `.exe`；不要把安装包提交进 Git。
 
 ## 校验
 

@@ -13,6 +13,8 @@
     "package:mac:testing": "npm run build:icon && npm run build && electron-builder --mac --dir --arm64",
     "dist:mac": "npm run dist:mac:testing",
     "dist:mac:testing": "npm run build:icon && npm run build && electron-builder --mac --dir --arm64 && node build/create-testing-zip.cjs",
+    "package:win": "npm run build && electron-builder --win --dir --x64",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
     "preview": "electron-vite preview",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
@@ -67,6 +69,24 @@
     },
     "dmg": {
       "title": "Skill 拆解器"
+    },
+    "win": {
+      "icon": "icon.svg",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Skill 拆解器"
     }
   }
 }
